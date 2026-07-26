@@ -17,7 +17,7 @@ export function FileImport({ onDataLoaded }: FileImportProps) {
     setIsLoading(true)
     setError(null)
     try {
-      const resp = await fetch('/sample.csv')
+      const resp = await fetch(`${import.meta.env.BASE_URL}sample.csv`)
       const text = await resp.text()
       const results = Papa.parse<Record<string, string>>(text, {
         header: true,

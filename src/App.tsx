@@ -15,9 +15,7 @@ function App() {
       <div className="min-h-screen bg-background text-foreground">
         <header className="border-b border-border/50 px-6 py-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground text-sm font-bold">
-              RV
-            </div>
+            <img src="/favicon.svg" alt="RidenView" className="h-8 w-8" />
             <h1 className="text-lg font-semibold tracking-tight">RidenView</h1>
             <span className="text-xs text-muted-foreground">Waveform Viewer</span>
           </div>

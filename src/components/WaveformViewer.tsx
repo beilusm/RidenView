@@ -1,353 +1,307 @@
-import { useState, useMemo, useCallback } from 'react'
-import {
-  LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, ReferenceArea,
-} from 'recharts'
-import { Card } from '@/components/ui/card'
-import { Badge } from '@/components/ui/badge'
-import { Checkbox } from '@/components/ui/checkbox'
-import { Separator } from '@/components/ui/separator'
+import { useCallback, useMemo, useState } from 'react'
+import { BarChart3, MousePointer2, RotateCcw, ZoomIn, ZoomOut } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { Upload, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react'
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
+import { MainChart } from '@/components/MainChart'
+import { Overview } from '@/components/Overview'
+import { useT } from '@/lib/i18n'
+import { cn } from '@/lib/utils'
+import {
+  CHANNELS, computeStats, decimate, enabledUnits, fmtClock, fmtDateTime,
+  fmtDuration, outputOffSpans, plotInsets, sliceRange,
+  type Channel, type ChannelKey, type ChannelStats, type Range, type Sample,
+} from '@/lib/waveform'
 
 interface WaveformViewerProps {
-  data: Record<string, string>[]
-  onLoadNew: () => void
+  samples: Sample[]
 }
 
-interface ChannelConfig {
-  key: string
-  label: string
-  unit: string
-  color: string
-  yAxisId: 'left' | 'right'
+const MAIN_BUCKETS = 1200
+const OVERVIEW_BUCKETS = 300
+
+function fmtCharge(ah: number): string {
+  return Math.abs(ah) < 1 ? `${(ah * 1000).toFixed(1)} mAh` : `${ah.toFixed(3)} Ah`
 }
 
-const CHANNELS: ChannelConfig[] = [
-  { key: 'voltage', label: 'Voltage', unit: 'V', color: '#3b82f6', yAxisId: 'left' },
-  { key: 'current', label: 'Current', unit: 'A', color: '#f97316', yAxisId: 'right' },
-  { key: 'power', label: 'Power', unit: 'W', color: '#ef4444', yAxisId: 'right' },
-  { key: 'inputVoltage', label: 'Input Voltage', unit: 'V', color: '#8b5cf6', yAxisId: 'left' },
-  { key: 'temperature', label: 'Temperature', unit: '°C', color: '#10b981', yAxisId: 'right' },
-]
-
-interface ChartRow {
-  ts: number
-  voltage: number
-  current: number
-  power: number
-  inputVoltage: number
-  temperature: number
+function fmtEnergy(wh: number): string {
+  return Math.abs(wh) < 1 ? `${(wh * 1000).toFixed(1)} mWh` : `${wh.toFixed(3)} Wh`
 }
 
-function toEpoch(s: string): number {
-  const d = new Date(s)
-  return isNaN(d.getTime()) ? 0 : d.getTime()
-}
-
-function fmtTick(ts: number): string {
-  const d = new Date(ts)
-  const h = String(d.getHours()).padStart(2, '0')
-  const m = String(d.getMinutes()).padStart(2, '0')
-  const s = String(d.getSeconds()).padStart(2, '0')
-  return `${h}:${m}:${s}`
-}
-
-function fmtFull(ts: number): string {
-  const d = new Date(ts)
-  return d.toLocaleString('zh-CN', {
-    month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-    hour12: false,
-  })
-}
-
-export function WaveformViewer({ data, onLoadNew }: WaveformViewerProps) {
-  const [enabledChannels, setEnabledChannels] = useState<Set<string>>(
-    new Set(['voltage', 'current'])
-  )
-  const [zoomDomain, setZoomDomain] = useState<[number, number] | null>(null)
-  const [refAreaLeft, setRefAreaLeft] = useState<number | null>(null)
-  const [refAreaRight, setRefAreaRight] = useState<number | null>(null)
+export function WaveformViewer({ samples }: WaveformViewerProps) {
+  const t = useT()
+  const [enabled, setEnabled] = useState<Set<ChannelKey>>(() => new Set(['voltage', 'current']))
+  const [view, setView] = useState<Range | null>(null)
+  const [hover, setHover] = useState<Sample | null>(null)
   const [showStats, setShowStats] = useState(true)
 
-  const chartData = useMemo<ChartRow[]>(() => {
-    return data.map(row => ({
-      ts: toEpoch(row.time),
-      voltage: parseFloat(row.voltage) || 0,
-      current: parseFloat(row.current) || 0,
-      power: parseFloat(row.power) || 0,
-      inputVoltage: parseFloat(row.inputVoltage) || 0,
-      temperature: parseFloat(row.temperature) || 0,
-    }))
-  }, [data])
+  const full = useMemo<Range>(() => {
+    const lo = samples[0].ts
+    const hi = samples[samples.length - 1].ts
+    return hi > lo ? [lo, hi] : [lo - 500, lo + 500]
+  }, [samples])
+  const span = full[1] - full[0]
+  const minSpan = Math.min(span, 200)
 
-  const displayData = useMemo(() => {
-    if (!zoomDomain) return chartData
-    const [lo, hi] = zoomDomain
-    return chartData.filter(d => d.ts >= lo && d.ts <= hi)
-  }, [chartData, zoomDomain])
+  const domain = view ?? full
+  const mainData = useMemo(() => decimate(sliceRange(samples, view), MAIN_BUCKETS), [samples, view])
+  const overviewData = useMemo(() => decimate(samples, OVERVIEW_BUCKETS), [samples])
+  const offSpans = useMemo(() => outputOffSpans(samples), [samples])
+  const stats = useMemo(() => computeStats(samples, view), [samples, view])
 
-  const timeRange = useMemo(() => {
-    if (displayData.length === 0) return { min: 0, max: 1 }
-    return {
-      min: displayData[0].ts,
-      max: displayData[displayData.length - 1].ts,
+  const lastInView = mainData[mainData.length - 1] ?? null
+  const readout = hover ?? lastInView
+  const hasState = samples.some(s => s.outputEnable != null || s.protectionState != null || s.activeSlot != null)
+  const unitCount = enabledUnits(enabled).length
+  const insets = useMemo(() => plotInsets(unitCount), [unitCount])
+
+  const applyView = useCallback((lo: number, hi: number) => {
+    let w = Math.max(minSpan, hi - lo)
+    if (w >= span) {
+      setView(null)
+      return
     }
-  }, [displayData])
+    lo = Math.min(full[1] - w, Math.max(full[0], lo))
+    w = Math.min(w, full[1] - lo)
+    setView([lo, lo + w])
+  }, [full, span, minSpan])
 
-  const computedTicks = useMemo(() => {
-    const { min, max } = timeRange
-    if (min === max) return [min]
-    const durationMs = max - min
-    const targetTicks = 8
-
-    const intervals = [100, 200, 500, 1000, 2000, 5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000]
-    let step = intervals[intervals.length - 1]
-    for (const iv of intervals) {
-      if (durationMs / iv <= targetTicks * 1.5) {
-        step = iv
-        break
-      }
-    }
-
-    const ticks: number[] = []
-    const start = Math.ceil(min / step) * step
-    for (let t = start; t <= max; t += step) {
-      ticks.push(t)
-    }
-    return ticks
-  }, [timeRange])
-
-  const stats = useMemo(() => {
-    const subset = zoomDomain
-      ? chartData.filter(d => d.ts >= zoomDomain[0] && d.ts <= zoomDomain[1])
-      : chartData
-
-    return CHANNELS.map(ch => {
-      const values = subset.map(d => d[ch.key as keyof ChartRow] as number).filter(v => !isNaN(v))
-      if (values.length === 0) return { ...ch, min: 0, max: 0, avg: 0 }
-      const min = Math.min(...values)
-      const max = Math.max(...values)
-      const avg = values.reduce((a, b) => a + b, 0) / values.length
-      return { ...ch, min, max, avg }
+  const zoomAt = useCallback((factor: number, at: number) => {
+    setView(prev => {
+      const [lo, hi] = prev ?? full
+      const w = Math.min(span, Math.max(minSpan, (hi - lo) * factor))
+      if (w >= span) return null
+      const frac = hi > lo ? (at - lo) / (hi - lo) : 0.5
+      const nlo = Math.min(full[1] - w, Math.max(full[0], at - frac * w))
+      return [nlo, nlo + w]
     })
-  }, [chartData, zoomDomain])
+  }, [full, span, minSpan])
 
-  const handleMouseDown = useCallback((e: Record<string, unknown>) => {
-    const val = e?.activeLabel as number | undefined
-    if (val != null) setRefAreaLeft(val)
-  }, [])
+  const pan = useCallback((delta: number) => {
+    setView(prev => {
+      if (!prev) return prev
+      const w = prev[1] - prev[0]
+      const lo = Math.min(full[1] - w, Math.max(full[0], prev[0] + delta))
+      return [lo, lo + w]
+    })
+  }, [full])
 
-  const handleMouseMove = useCallback((e: Record<string, unknown>) => {
-    const val = e?.activeLabel as number | undefined
-    if (refAreaLeft != null && val != null) setRefAreaRight(val)
-  }, [refAreaLeft])
+  const select = useCallback((r: Range) => applyView(r[0], r[1]), [applyView])
+  const navigate = useCallback((r: Range | null) => (r ? applyView(r[0], r[1]) : setView(null)), [applyView])
+  const zoomCenter = (factor: number) => zoomAt(factor, (domain[0] + domain[1]) / 2)
 
-  const handleMouseUp = useCallback(() => {
-    if (refAreaLeft != null && refAreaRight != null) {
-      const lo = Math.min(refAreaLeft, refAreaRight)
-      const hi = Math.max(refAreaLeft, refAreaRight)
-      if (hi - lo > 1000) {
-        setZoomDomain([lo, hi])
-      }
-    }
-    setRefAreaLeft(null)
-    setRefAreaRight(null)
-  }, [refAreaLeft, refAreaRight])
-
-  const zoomOut = useCallback(() => setZoomDomain(null), [])
-
-  const handleZoomIn = useCallback(() => {
-    if (chartData.length < 2) return
-    const minTs = chartData[0].ts
-    const maxTs = chartData[chartData.length - 1].ts
-    const mid = (minTs + maxTs) / 2
-    const half = (maxTs - minTs) / 4
-    setZoomDomain([mid - half, mid + half])
-  }, [chartData])
+  const toggle = (key: ChannelKey) => {
+    setEnabled(prev => {
+      const next = new Set(prev)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
+      return next
+    })
+  }
 
   return (
-    <div className="flex flex-col h-[calc(100vh-52px)]">
-      <div className="flex items-center justify-between border-b border-border/50 px-4 py-2">
-        <div className="flex items-center gap-2">
-          <Badge variant="outline" className="text-xs">
-            {data.length.toLocaleString()} samples
-          </Badge>
-          {zoomDomain && (
-            <Badge variant="secondary" className="text-xs">
-              {fmtFull(zoomDomain[0])} ~ {fmtFull(zoomDomain[1])}
-            </Badge>
-          )}
-        </div>
-        <div className="flex items-center gap-1">
-          <Button variant="ghost" size="icon-sm" onClick={handleZoomIn} title="Zoom In">
-            <ZoomIn className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="ghost" size="icon-sm" onClick={zoomOut} disabled={!zoomDomain} title="Reset Zoom">
-            <ZoomOut className="h-3.5 w-3.5" />
-          </Button>
-          <Button variant="ghost" size="icon-sm" onClick={handleZoomIn} title="Fit View">
-            <Maximize2 className="h-3.5 w-3.5" />
-          </Button>
-          <Separator orientation="vertical" className="mx-1 h-5" />
-          <Button variant="ghost" size="icon-sm" onClick={onLoadNew} title="Load New File">
-            <Upload className="h-3.5 w-3.5" />
-          </Button>
-        </div>
+    <div className="flex flex-col gap-3 p-3 sm:p-4 lg:h-[calc(100dvh-3.5rem)]">
+      <div className="grid shrink-0 grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5">
+        {CHANNELS.map(ch => (
+          <ChannelCard
+            key={ch.key}
+            channel={ch}
+            value={readout?.[ch.key] ?? null}
+            stats={stats.channels[ch.key]}
+            extra={
+              ch.key === 'current' ? fmtCharge(stats.charge)
+                : ch.key === 'power' ? fmtEnergy(stats.energy)
+                  : null
+            }
+            enabled={enabled.has(ch.key)}
+            showStats={showStats}
+            onToggle={() => toggle(ch.key)}
+          />
+        ))}
       </div>
 
-      <div className="flex flex-1 min-h-0">
-        <div className="w-48 border-r border-border/50 p-3 flex flex-col gap-2 overflow-y-auto">
-          <p className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground mb-1">Channels</p>
-          {CHANNELS.map(ch => (
-            <label
-              key={ch.key}
-              className="flex items-center gap-2 cursor-pointer rounded-md px-2 py-1.5 hover:bg-muted/50 transition-colors"
-            >
-              <Checkbox
-                checked={enabledChannels.has(ch.key)}
-                onCheckedChange={(checked: boolean) => {
-                  setEnabledChannels(prev => {
-                    const next = new Set(prev)
-                    if (checked) next.add(ch.key)
-                    else next.delete(ch.key)
-                    return next
-                  })
-                }}
-              />
-              <div
-                className="h-2.5 w-2.5 rounded-full shrink-0"
-                style={{ backgroundColor: ch.color }}
-              />
-              <span className="text-xs flex-1 truncate">{ch.label}</span>
-              <span className="text-[10px] text-muted-foreground">{ch.unit}</span>
-            </label>
+      <section className="flex flex-col overflow-hidden rounded-xl border bg-card lg:min-h-[420px] lg:flex-1">
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b px-3 py-2">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+            <span className="font-mono tabular-nums text-muted-foreground">
+              {fmtDateTime(domain[0])} <span className="opacity-50">→</span> {fmtClock(domain[1])}
+            </span>
+            <span className="tabular-nums">
+              <span className="text-muted-foreground">{t.span} </span>
+              {fmtDuration(domain[1] - domain[0])}
+            </span>
+            <span className="tabular-nums">
+              <span className="text-muted-foreground">{t.samplesLabel} </span>
+              {stats.count.toLocaleString()}
+              {view && <span className="text-muted-foreground"> / {samples.length.toLocaleString()}</span>}
+            </span>
+          </div>
+
+          <div className="ml-auto flex items-center gap-3">
+            {hasState && readout && <StateChips sample={readout} />}
+            <div className="flex items-center rounded-lg border p-0.5">
+              <IconButton label={t.zoomIn} onClick={() => zoomCenter(0.5)} disabled={span <= minSpan || (view != null && view[1] - view[0] <= minSpan)}>
+                <ZoomIn />
+              </IconButton>
+              <IconButton label={t.zoomOut} onClick={() => zoomCenter(2)} disabled={!view}>
+                <ZoomOut />
+              </IconButton>
+              <IconButton label={t.resetZoom} onClick={() => setView(null)} disabled={!view}>
+                <RotateCcw />
+              </IconButton>
+              <span className="mx-0.5 h-4 w-px bg-border" />
+              <IconButton label={showStats ? t.hideStats : t.showStats} onClick={() => setShowStats(s => !s)} active={showStats}>
+                <BarChart3 />
+              </IconButton>
+            </div>
+          </div>
+        </div>
+
+        <div className="h-80 bg-plot px-1 pt-2 sm:h-96 lg:h-auto lg:min-h-0 lg:flex-1">
+          <MainChart
+            data={mainData}
+            enabled={enabled}
+            domain={domain}
+            offSpans={offSpans}
+            onHover={setHover}
+            onSelect={select}
+            onZoom={zoomAt}
+            onPan={pan}
+          />
+        </div>
+
+        <div className="border-t bg-muted/30 px-1 pt-1">
+          <Overview data={overviewData} enabled={enabled} full={full} view={view} insets={insets} onChange={navigate} />
+          <p className="flex items-center gap-1.5 px-2 pb-1.5 text-[10px] text-muted-foreground">
+            <MousePointer2 className="size-3" />
+            {t.hint}
+          </p>
+        </div>
+      </section>
+    </div>
+  )
+}
+
+interface ChannelCardProps {
+  channel: Channel
+  value: number | null
+  stats: ChannelStats
+  extra: string | null
+  enabled: boolean
+  showStats: boolean
+  onToggle: () => void
+}
+
+function ChannelCard({ channel, value, stats, extra, enabled, showStats, onToggle }: ChannelCardProps) {
+  const t = useT()
+  const fmt = (v: number) => v.toFixed(channel.digits)
+  return (
+    <button
+      type="button"
+      aria-pressed={enabled}
+      onClick={onToggle}
+      className={cn(
+        'group relative overflow-hidden rounded-xl border bg-card px-3.5 py-3 text-left transition-all',
+        'outline-none focus-visible:ring-3 focus-visible:ring-ring/50',
+        enabled ? 'shadow-sm' : 'opacity-55 hover:opacity-80',
+      )}
+      style={enabled ? { borderColor: `color-mix(in oklab, ${channel.color} 45%, transparent)` } : undefined}
+    >
+      <span
+        className="absolute inset-x-0 top-0 h-0.5 transition-opacity"
+        style={{ backgroundColor: channel.color, opacity: enabled ? 1 : 0 }}
+      />
+      <div className="flex items-center gap-2">
+        <span
+          className="size-2.5 rounded-full border-2 transition-colors"
+          style={{ borderColor: channel.color, backgroundColor: enabled ? channel.color : 'transparent' }}
+        />
+        <span className="text-[11px] font-semibold tracking-wider text-muted-foreground">{channel.short}</span>
+        <span className="ml-auto truncate text-[10px] text-muted-foreground/70">{t.channels[channel.key]}</span>
+      </div>
+
+      <div className="mt-1.5 flex flex-wrap items-baseline gap-x-1 font-mono tabular-nums">
+        <span className="text-2xl font-semibold tracking-tight" style={{ color: enabled ? channel.color : undefined }}>
+          {value == null ? '--' : fmt(value)}
+        </span>
+        <span className="text-sm text-muted-foreground">{channel.unit}</span>
+        {extra && showStats && (
+          <span className="ml-auto self-center whitespace-nowrap rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">Σ {extra}</span>
+        )}
+      </div>
+
+      {showStats && (
+        <dl className="mt-2 grid grid-cols-3 gap-1 border-t pt-2 text-[10px]">
+          {(['min', 'avg', 'max'] as const).map(k => (
+            <div key={k} className="min-w-0">
+              <dt className="uppercase tracking-wider text-muted-foreground/70">{t[k]}</dt>
+              <dd className="truncate font-mono tabular-nums">{fmt(stats[k])}</dd>
+            </div>
           ))}
+        </dl>
+      )}
+    </button>
+  )
+}
 
-          <Separator className="my-2" />
+function StateChips({ sample }: { sample: Sample }) {
+  const t = useT()
+  const prot = sample.protectionState
+  const tripped = prot != null && prot !== 0
+  return (
+    <div className="flex items-center gap-1.5 text-[10px] font-medium">
+      {sample.outputEnable != null && (
+        <span
+          className={cn(
+            'rounded-md px-1.5 py-0.5',
+            sample.outputEnable ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'bg-muted text-muted-foreground',
+          )}
+        >
+          {sample.outputEnable ? t.outOn : t.outOff}
+        </span>
+      )}
+      {prot != null && (
+        <span
+          className={cn(
+            'rounded-md px-1.5 py-0.5',
+            tripped ? 'bg-destructive/15 text-destructive' : 'bg-muted text-muted-foreground',
+          )}
+        >
+          {t.protection[prot] ?? t.protectionOther(prot)}
+        </span>
+      )}
+      {sample.activeSlot != null && (
+        <span className="rounded-md bg-muted px-1.5 py-0.5 text-muted-foreground">M{sample.activeSlot}</span>
+      )}
+    </div>
+  )
+}
 
+interface IconButtonProps {
+  label: string
+  onClick: () => void
+  disabled?: boolean
+  active?: boolean
+  children: React.ReactNode
+}
+
+function IconButton({ label, onClick, disabled, active, children }: IconButtonProps) {
+  return (
+    <Tooltip>
+      <TooltipTrigger
+        render={
           <Button
             variant="ghost"
-            size="sm"
-            className="text-xs justify-start h-7"
-            onClick={() => setShowStats(s => !s)}
-          >
-            {showStats ? 'Hide Stats' : 'Show Stats'}
-          </Button>
-
-          {showStats && (
-            <div className="space-y-2 mt-1">
-              {stats.map(ch => (
-                enabledChannels.has(ch.key) && (
-                  <div key={ch.key} className="text-[10px] space-y-0.5">
-                    <p className="font-medium text-muted-foreground">{ch.label}</p>
-                    <div className="grid grid-cols-3 gap-1">
-                      <div>
-                        <span className="text-muted-foreground">Min </span>
-                        <span className="font-mono">{ch.min.toFixed(2)}</span>
-                      </div>
-                      <div>
-                        <span className="text-muted-foreground">Max </span>
-                        <span className="font-mono">{ch.max.toFixed(2)}</span>
-                      </div>
-                      <div>
-                        <span className="text-muted-foreground">Avg </span>
-                        <span className="font-mono">{ch.avg.toFixed(2)}</span>
-                      </div>
-                    </div>
-                  </div>
-                )
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className="flex-1 p-4 min-w-0">
-          <Card className="h-full p-4 overflow-hidden">
-            <ResponsiveContainer width="100%" height="100%">
-              <LineChart
-                data={displayData}
-                onMouseDown={handleMouseDown}
-                onMouseMove={handleMouseMove}
-                onMouseUp={handleMouseUp}
-              >
-                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" opacity={0.5} />
-                <XAxis
-                  dataKey="ts"
-                  type="number"
-                  domain={[timeRange.min, timeRange.max]}
-                  tickFormatter={fmtTick}
-                  tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
-                  tickLine={false}
-                  axisLine={false}
-                  ticks={computedTicks}
-                  allowDataOverflow
-                />
-                <YAxis yAxisId="left" orientation="left"
-                  tick={{ fontSize: 10, fill: '#3b82f6' }}
-                  tickLine={false} axisLine={false} width={48}
-                />
-                <YAxis yAxisId="right" orientation="right"
-                  tick={{ fontSize: 10, fill: '#f97316' }}
-                  tickLine={false} axisLine={false} width={48}
-                />
-                <Tooltip
-                  content={({ active, payload, label }) => {
-                    if (!active || !payload?.length) return null
-                    const ts = Number(label)
-                    return (
-                      <div className="rounded-lg border border-border/50 bg-background px-2.5 py-1.5 text-xs shadow-xl">
-                        <p className="font-medium text-muted-foreground mb-1">
-                          {fmtFull(ts)}
-                        </p>
-                        {payload.map(entry => {
-                          const ch = CHANNELS.find(c => c.key === entry.dataKey)
-                          return (
-                            <div key={String(entry.dataKey)} className="flex items-center gap-2">
-                              <div
-                                className="h-2 w-2 rounded-full shrink-0"
-                                style={{ backgroundColor: ch?.color }}
-                              />
-                              <span className="text-muted-foreground">{ch?.label}</span>
-                              <span className="font-mono font-medium ml-auto">
-                                {typeof entry.value === 'number' ? entry.value.toFixed(3) : entry.value} {ch?.unit}
-                              </span>
-                            </div>
-                          )
-                        })}
-                      </div>
-                    )
-                  }}
-                />
-                {CHANNELS.map(ch => (
-                  enabledChannels.has(ch.key) && (
-                    <Line
-                      key={ch.key}
-                      yAxisId={ch.yAxisId}
-                      type="monotone"
-                      dataKey={ch.key}
-                      stroke={ch.color}
-                      dot={false}
-                      strokeWidth={1.5}
-                      isAnimationActive={false}
-                    />
-                  )
-                ))}
-                {refAreaLeft != null && refAreaRight != null && (
-                  <ReferenceArea
-                    yAxisId="left"
-                    x1={Math.min(refAreaLeft, refAreaRight)}
-                    x2={Math.max(refAreaLeft, refAreaRight)}
-                    strokeOpacity={0.3}
-                    fill="hsl(var(--primary))"
-                    fillOpacity={0.1}
-                  />
-                )}
-              </LineChart>
-            </ResponsiveContainer>
-          </Card>
-        </div>
-      </div>
-    </div>
+            size="icon-sm"
+            aria-label={label}
+            onClick={onClick}
+            disabled={disabled}
+            className={cn(active && 'bg-muted text-foreground')}
+          />
+        }
+      >
+        {children}
+      </TooltipTrigger>
+      <TooltipContent>{label}</TooltipContent>
+    </Tooltip>
   )
 }

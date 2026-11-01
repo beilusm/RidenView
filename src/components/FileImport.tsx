@@ -1,136 +1,93 @@
-import { useCallback, useRef, useState } from 'react'
-import Papa from 'papaparse'
-import { Card } from '@/components/ui/card'
-import { Upload, FileText } from 'lucide-react'
+import { FileUp, FlaskConical, Loader2 } from 'lucide-react'
+import { Button } from '@/components/ui/button'
+import { useT } from '@/lib/i18n'
+import type { LoadError } from '@/hooks/useCsvLoader'
+import { cn } from '@/lib/utils'
 
 interface FileImportProps {
-  onDataLoaded: (data: Record<string, string>[]) => void
+  onPick: () => void
+  onSample: () => void
+  isLoading: boolean
+  isDragging: boolean
+  error: LoadError | null
 }
 
-export function FileImport({ onDataLoaded }: FileImportProps) {
-  const [isDragging, setIsDragging] = useState(false)
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
+const REQUIRED = ['time', 'voltage', 'current', 'power', 'inputVoltage', 'temperature']
+const OPTIONAL = ['outputEnable', 'protectionState', 'activeSlot']
 
-  const loadSample = useCallback(async () => {
-    setIsLoading(true)
-    setError(null)
-    try {
-      const resp = await fetch(`${import.meta.env.BASE_URL}sample.csv`)
-      const text = await resp.text()
-      const results = Papa.parse<Record<string, string>>(text, {
-        header: true,
-        skipEmptyLines: true,
-      })
-      setIsLoading(false)
-      if (results.errors.length > 0) {
-        setError(`Parse error: ${results.errors[0].message}`)
-        return
-      }
-      if (results.data.length === 0) {
-        setError('File is empty or has no valid data rows')
-        return
-      }
-      onDataLoaded(results.data)
-    } catch {
-      setIsLoading(false)
-      setError('Failed to load sample file')
-    }
-  }, [onDataLoaded])
-
-  const handleFile = useCallback((file: File) => {
-    setIsLoading(true)
-    setError(null)
-    Papa.parse(file, {
-      header: true,
-      skipEmptyLines: true,
-      complete(results) {
-        setIsLoading(false)
-        if (results.errors.length > 0) {
-          setError(`Parse error: ${results.errors[0].message}`)
-          return
-        }
-        if (results.data.length === 0) {
-          setError('File is empty or has no valid data rows')
-          return
-        }
-        onDataLoaded(results.data as Record<string, string>[])
-      },
-      error(_err: unknown) {
-        setIsLoading(false)
-        setError('Failed to parse file')
-      },
-    })
-  }, [onDataLoaded])
-
-  const onDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(false)
-    const file = e.dataTransfer.files[0]
-    if (file) handleFile(file)
-  }, [handleFile])
-
-  const onDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault()
-    setIsDragging(true)
-  }, [])
-
-  const onDragLeave = useCallback(() => setIsDragging(false), [])
-
-  const onFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0]
-    if (file) handleFile(file)
-  }, [handleFile])
-
+export function FileImport({ onPick, onSample, isLoading, isDragging, error }: FileImportProps) {
+  const t = useT()
   return (
-    <div className="flex items-center justify-center min-h-[calc(100vh-52px)] p-6">
-      <Card
-        className={`w-full max-w-lg p-12 text-center cursor-pointer transition-colors border-2 border-dashed
-          ${isDragging ? 'border-primary bg-primary/5' : 'border-border/50 hover:border-border'}
-          ${isLoading ? 'pointer-events-none opacity-60' : ''}`}
-        onDrop={onDrop}
-        onDragOver={onDragOver}
-        onDragLeave={onDragLeave}
-        onClick={() => inputRef.current?.click()}
-      >
-        <input
-          ref={inputRef}
-          type="file"
-          accept=".csv"
-          className="hidden"
-          onChange={onFileChange}
+    <div className="relative min-h-[calc(100dvh-3.5rem)] overflow-hidden">
+      <div className="pointer-events-none absolute inset-0 bg-grid [mask-image:radial-gradient(ellipse_at_top,black_20%,transparent_70%)]" />
+      <div className="pointer-events-none absolute -top-40 left-1/2 h-80 w-[48rem] -translate-x-1/2 rounded-full bg-sky-500/15 blur-3xl" />
+
+      <div className="relative mx-auto flex max-w-3xl flex-col items-center px-6 pt-16 pb-12 text-center sm:pt-24">
+        <img
+          src={`${import.meta.env.BASE_URL}favicon.png`}
+          alt=""
+          className="size-14 rounded-2xl shadow-lg ring-1 ring-foreground/10"
         />
-        <div className="flex flex-col items-center gap-4">
-          <div className="flex h-16 w-16 items-center justify-center rounded-2xl bg-muted">
-            {isLoading ? (
-              <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-            ) : isDragging ? (
-              <FileText className="h-8 w-8 text-primary" />
-            ) : (
-              <Upload className="h-8 w-8 text-muted-foreground" />
-            )}
-          </div>
-          <div>
-            <p className="text-base font-medium">
-              {isLoading ? 'Parsing CSV...' : 'Drop CSV file here or click to browse'}
-            </p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Supports voltage, current, power, temperature waveform data
-            </p>
-          </div>
-          {error && (
-            <p className="text-sm text-destructive">{error}</p>
+        <h2 className="mt-6 text-3xl font-semibold tracking-tight text-balance sm:text-4xl">
+          {t.heroTitle}
+        </h2>
+        <p className="mt-3 max-w-xl text-sm text-muted-foreground text-balance sm:text-base">
+          {t.heroBody}
+        </p>
+
+        <div
+          role="button"
+          tabIndex={0}
+          onClick={onPick}
+          onKeyDown={e => (e.key === 'Enter' || e.key === ' ') && (e.preventDefault(), onPick())}
+          className={cn(
+            'mt-10 w-full max-w-xl cursor-pointer rounded-2xl border-2 border-dashed bg-card/60 p-10 backdrop-blur transition-colors',
+            'outline-none focus-visible:ring-3 focus-visible:ring-ring/50',
+            isDragging ? 'border-primary bg-primary/5' : 'border-border hover:border-foreground/25',
+            isLoading && 'pointer-events-none opacity-70',
           )}
-          <button
-            type="button"
-            className="mt-2 text-sm text-primary underline underline-offset-4 hover:text-primary/80"
-            onClick={(e) => { e.stopPropagation(); loadSample() }}
-          >
-            Load sample data
-          </button>
+        >
+          <div className="mx-auto flex size-14 items-center justify-center rounded-2xl bg-primary/10 text-primary">
+            {isLoading ? <Loader2 className="size-6 animate-spin" /> : <FileUp className="size-6" />}
+          </div>
+          <p className="mt-4 font-medium">{isLoading ? t.parsing : t.dropHere}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{t.orBrowse}</p>
+
+          <div className="mt-6 flex flex-wrap items-center justify-center gap-2">
+            <Button
+              size="lg"
+              className="px-4"
+              disabled={isLoading}
+              onClick={e => { e.stopPropagation(); onPick() }}
+            >
+              <FileUp /> {t.chooseFile}
+            </Button>
+            <Button
+              size="lg"
+              variant="outline"
+              className="px-4"
+              disabled={isLoading}
+              onClick={e => { e.stopPropagation(); onSample() }}
+            >
+              <FlaskConical /> {t.loadSample}
+            </Button>
+          </div>
+
+          {error && (
+            <p className="mt-5 rounded-lg bg-destructive/10 px-3 py-2 text-sm text-destructive">{t.errors[error.code](error.detail)}</p>
+          )}
         </div>
-      </Card>
+
+        <div className="mt-8 flex max-w-xl flex-wrap items-center justify-center gap-1.5 text-xs">
+          <span className="mr-1 text-muted-foreground">{t.columns}</span>
+          {REQUIRED.map(c => (
+            <code key={c} className="rounded-md border bg-card px-1.5 py-0.5 font-mono">{c}</code>
+          ))}
+          {OPTIONAL.map(c => (
+            <code key={c} className="rounded-md border border-dashed px-1.5 py-0.5 font-mono text-muted-foreground">{c}</code>
+          ))}
+        </div>
+      </div>
     </div>
   )
 }
